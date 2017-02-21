@@ -2,13 +2,14 @@
 #include <time.h>
 #include "w7x_timing.h"
 
-static struct timespec t = { 0, 100 };
+#define DEFAULT_DELAY 600000000 //60s
+
 static char error[1024];
 #define CHECK_INPUTS \
   uint64_t delay, cycle; \
   uint32_t width, period, repeat, count; \
   if (!width_p && !period_p && !cycle_p && !repeat_p && !count_p) { \
-    delay  = delay_p ? *delay_p : 60000000; \
+    delay  = delay_p ? *delay_p : DEFAULT_DELAY; \
     cycle  = 0; \
     width  = 5; \
     period = 10; \
@@ -47,9 +48,23 @@ int getDev(int *pos) {
     return C_DEV_ERROR;
 }
 
+uint64_t _getClock() {
+  uint8_t buf[8];
+  int i;
+  buf[7]=buf[6]=buf[5]=0;
+  for (i = 3 ; i < 8 ; i++)
+    buf[i-3] = dev->r_status[i];
+  return *(uint64_t*)buf;
+}
+
+int getClock(uint64_t * clock) {
+  INIT_DEVICE
+  *clock = _getClock();
+  return C_OK;
+}
+
 int getStatus(int idx, int *pos) {
   int pos_in = *pos;
-  uint8_t buf[8];
   if (idx >= MAX_STATUS || idx < 0) {
     *pos += sprintf(error+*pos,"ERROR: IDX < 0 or IDX > %lu",MAX_STATUS-1);
     return -1;
@@ -87,20 +102,17 @@ int getStatus(int idx, int *pos) {
   }
   if (idx>0)
     *pos += sprintf(error+*pos,"\n");
-  else if (status&1)
-    *pos += sprintf(error+*pos," - ok\n");
-  else {
+  else if (status&1) {
+    *pos += sprintf(error+*pos," - ok @ ticks: %llu\n",_getClock());
+  } else {
     *pos += sprintf(error+*pos," - errors:\n");
     for (i = 1 ; i < 3 ; i++)
       getStatus(i,pos);
-    buf[7]=buf[6]=buf[5]=0;
-    for (i = 3 ; i < 8 ; i++)
-      buf[i-3] = dev->r_status[i];
-    *pos += sprintf(error+*pos,"ticks: %llu\n",*(uint64_t*)buf);
-   }
+    *pos += sprintf(error+*pos," @ ticks: %llu\n",_getClock());
   }
   if (pos_in==0)
     printf(error);
+  }
   return status;
 }
 
@@ -123,8 +135,8 @@ int getParams(uint64_t *delay_p, uint32_t *width_p, uint32_t *period_p, uint64_t
 int getTimes(uint32_t offset, uint32_t count, uint64_t *times_p) {
   int i, max = MAX_SAMPLES - offset;
   INIT_DEVICE
-  for (i = 0 ; i < count ; i++)
-    times_p[i] = i<max ? dev->w_times[i+offset] : 0;
+  memcpy(times_p, &(dev->w_times[offset]), (count<max ? count : max)*sizeof(uint64_t));
+  for (i = max ; i < count ; i++) times_p[i] = 0;
   return C_OK;
 }
 
@@ -136,6 +148,14 @@ int setParams(uint64_t delay, uint32_t width, uint32_t period, uint64_t cycle, u
   }
   if(width >= period) {
     *pos += sprintf(error+*pos,"ERROR: WIDTH >= PERIOD\n");
+    return C_PARAM_ERROR;
+  }
+  if (delay>MAX_TIME) {
+    *pos += sprintf(error+*pos,"ERROR: DELAY > MAX_TIME = %llu\n",MAX_TIME);
+    return C_PARAM_ERROR;
+  }
+  if (cycle>MAX_TIME) {
+    *pos += sprintf(error+*pos,"ERROR: CYCLE > MAX_TIME = %llu\n",MAX_TIME);
     return C_PARAM_ERROR;
   }
   if (getDev(pos))
@@ -155,7 +175,7 @@ char* getError() {
 
 int makeClock(const uint64_t *delay_p, const uint32_t *width_p, const uint32_t *period_p, const uint64_t *cycle_p, const uint32_t *repeat_p, const uint32_t *count_p){
     int pos = sprintf(error,"MAKE CLOCK: ");
-    uint64_t time;
+    uint64_t time = 0;
     CHECK_INPUTS
     if (cycle_p) {
       cycle = *cycle_p;
@@ -169,10 +189,9 @@ int makeClock(const uint64_t *delay_p, const uint32_t *width_p, const uint32_t *
     int i,c_status = setParams(delay, width, period, cycle, repeat, count, &pos);
     printf(error);
     if(c_status) return c_status;
-    time = 0;
     for(i = 0; i < count; i++) {
 	dev->w_times[i] = time;
-        time = time + period;
+        time += period;
     }
     dev->w_count = count;
     return C_OK;
@@ -223,15 +242,36 @@ int makeSequence(const uint64_t *delay_p, const uint32_t *width_p, const uint32_
 
 int trig() {
     INIT_DEVICE
-    dev->w_trig = 1;
+    dev->w_trig = -1;
+    return C_OK;
+}
+
+int reinit(uint64_t *delay_p) {
+    INIT_DEVICE
+    if (delay_p) {
+      makeClock(delay_p,NULL,NULL,NULL,NULL,NULL);
+      dev->w_save   = -1;
+      dev->w_clear  = -1;
+      dev->w_init   = -1;
+      dev->w_reinit = -1;
+    } else {
+      dev->w_reinit =  0;
+      dev->w_init   =  0;
+    }
+    return C_OK;
+}
+
+int extclk(int val) {
+    INIT_DEVICE
+    dev->w_ext_clk = val ? -1 : 0;
     return C_OK;
 }
 
 int arm() {
     int i;
     INIT_DEVICE
-    dev->w_clear = 1;
-    dev->w_init  = 1;
+    dev->w_clear = -1;
+    dev->w_init  = -1;
     return C_OK;
 }
 
